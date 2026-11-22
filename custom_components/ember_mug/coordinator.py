@@ -19,6 +19,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import DOMAIN, MANUFACTURER, STORAGE_VERSION, SUGGESTED_AREA
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from ember_mug import EmberMug
     from home_assistant_bluetooth import BluetoothServiceInfoBleak
     from homeassistant.components.bluetooth import BluetoothChange
@@ -59,7 +61,35 @@ class MugDataUpdateCoordinator(DataUpdateCoordinator[MugData]):
         self.data = self.mug.data
         self.available = False
         self._last_refresh_was_full = True
+        self._date_time_zone_error_logged = False
+        self._make_date_time_zone_read_tolerant()
         _LOGGER.info("%s %s Setup", self.mug.model_name, self.name)
+
+    def _make_date_time_zone_read_tolerant(self) -> None:
+        """
+        Stop an invalid time zone on the mug from failing the whole update.
+
+        python-ember-mug decodes the time zone offset byte without a range check, so a mug
+        with no time zone set (0x80, i.e. -128 hours) raises ValueError and aborts every
+        update. The library reads each attribute via ``getattr(mug, f"get_{attr}")``, so
+        replacing the getter on this instance covers every path that reads it.
+        """
+        original_getter = self.mug.get_date_time_zone
+
+        async def get_date_time_zone() -> datetime | None:
+            try:
+                return await original_getter()
+            except (ValueError, OverflowError) as e:
+                log = _LOGGER.debug if self._date_time_zone_error_logged else _LOGGER.warning
+                log(
+                    "%s reported an invalid date/time zone, ignoring it: %s",
+                    self.mug.model_name,
+                    e,
+                )
+                self._date_time_zone_error_logged = True
+                return None
+
+        self.mug.get_date_time_zone = get_date_time_zone  # type: ignore[method-assign]
 
     async def _async_setup(self) -> None:
         """Initialise coordinator and fetch initial data."""
